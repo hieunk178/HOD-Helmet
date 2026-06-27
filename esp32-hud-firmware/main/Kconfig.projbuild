@@ -1,0 +1,72 @@
+menu "HUD Helmet Configuration"
+
+    choice HUD_DISPLAY_TYPE
+        prompt "Display type"
+        default HUD_DISPLAY_ST7735
+        help
+            Select the TFT display controller type.
+            Use ST7735 for real 0.96 inch hardware.
+            Use ST7789 for real 1.3 inch hardware.
+            Use ILI9341 for Wokwi simulator testing.
+
+        config HUD_DISPLAY_ST7735
+            bool "ST7735 (Real hardware - 0.96 inch 160x80)"
+
+        config HUD_DISPLAY_ST7789
+            bool "ST7789 (Real hardware - 1.3 inch 240x240)"
+
+        config HUD_DISPLAY_ILI9341
+            bool "ILI9341 (Wokwi simulator - 240x320)"
+    endchoice
+
+    config HUD_DISPLAY_WIDTH
+        int
+        default 160 if HUD_DISPLAY_ST7735
+        default 240 if HUD_DISPLAY_ST7789
+        default 320 if HUD_DISPLAY_ILI9341
+
+    config HUD_DISPLAY_HEIGHT
+        int
+        default 80 if HUD_DISPLAY_ST7735
+        default 240 if HUD_DISPLAY_ST7789
+        default 240 if HUD_DISPLAY_ILI9341
+
+    config HUD_HAS_BACKLIGHT_PIN
+        bool "Enable backlight GPIO control"
+        default y if HUD_DISPLAY_ST7735
+        default y if HUD_DISPLAY_ST7789
+        default n if HUD_DISPLAY_ILI9341
+        help
+            Enable hardware backlight pin control.
+            Disable for Wokwi simulator (no backlight pin).
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "Wokwi-GUEST" if HUD_DISPLAY_ILI9341
+        default "YourWiFiSSID"
+        help
+            SSID (network name) for the HUD to connect to.
+            Use "Wokwi-GUEST" for Wokwi simulator (open network).
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "" if HUD_DISPLAY_ILI9341
+        default "YourWiFiPassword"
+        help
+            WiFi password (WPA or WPA2) for the network.
+            Leave empty for Wokwi-GUEST open network.
+
+    config ESP_WIFI_MAX_RETRY
+        int "Maximum retry"
+        default 5
+        help
+            Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
+
+    config HUD_NOTIFICATION_TIMEOUT_SEC
+        int "Notification display timeout (seconds)"
+        default 30
+        help
+            Time in seconds before a notification is automatically dismissed from the HUD display.
+
+endmenu
+

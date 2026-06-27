@@ -1,0 +1,34 @@
+# Wokwi simulator files
+diagram.json
+wokwi.toml
+wokwi-project.txt
+
+# ESP-IDF
+build/
+esp32-hud-firmware/build/
+esp32-hud-firmware/dependencies.lock
+sdkconfig.old
+.ninja_log
+.ninja_deps
+
+# Android Studio / Gradle
+.gradle/
+.idea/
+build/
+app/build/
+local.properties
+*.iml
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# SquareLine Studio Backups
+hud_screen/backup/

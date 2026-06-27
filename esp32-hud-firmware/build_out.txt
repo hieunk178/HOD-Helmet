@@ -1,0 +1,19 @@
+ninja: Entering directory `build'
+[1/9] Performing build step for 'bootloader'
+[1/1] C:\Windows\system32\cmd.exe /C "cd /D "C:\Project\HOD Helmet\esp32-hud-firmware\build\bootloader" && C:\Espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe C:/esp/v6.0.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x1000 "C:/Project/HOD Helmet/esp32-hud-firmware/build/bootloader/bootloader.bin""
+Bootloader binary size 0x6610 bytes. 0x9f0 bytes (9%) free.
+[2/9] No install step for 'bootloader'
+[3/9] Completed 'bootloader'
+[4/9] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/hud_renderer.c.obj
+[5/9] Linking C static library esp-idf\main\libmain.a
+[6/9] Generating esp-idf/esp_system/ld/sections.ld
+[7/9] Linking CXX executable hud-helmet-firmware.elf
+[8/9] Generating binary image from built executable
+esptool v5.3.dev3
+Creating ESP32 image...
+Merged 3 ELF sections.
+Successfully created ESP32 image.
+Generated C:/Project/HOD Helmet/esp32-hud-firmware/build/hud-helmet-firmware.bin
+[9/9] C:\Windows\system32\cmd.exe /C "cd /D "C:\Project\HOD Helmet\esp32-hud-firmware\build" && C:\Espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe C:/esp/v6.0.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app "C:/Project/HOD Helmet/esp32-hud-firmware/build/partition_table/partition-table.bin" "C:/Project/HOD Helmet/esp32-hud-firmware/build/hud-helmet-firmware.bin""
+hud-helmet-firmware.bin binary size 0xf6e00 bytes. Smallest app partition is 0x100000 bytes. 0x9200 bytes (4%) free.
+Warning: The smallest app partition is nearly full (4% free space left)!

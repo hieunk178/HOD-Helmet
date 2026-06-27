@@ -1,0 +1,28 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi_manager.c"
+        "http_server.c"
+        "display_driver.c"
+        "hud_renderer.c"
+        "hud_stream.c"
+        "icons.c"
+        "ui/ui.c"
+        "ui/lv_font_vn_12.c"
+        "ui/lv_font_vn_16.c"
+        "ui/lv_font_vn_24.c"
+    INCLUDE_DIRS
+        "."
+        "ui"
+    REQUIRES
+        driver
+        esp_wifi
+        esp_http_server
+        esp_lcd
+        nvs_flash
+        esp_event
+        esp_netif
+        esp_timer
+        lvgl
+
+)

@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">HUD Helmet</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_settings">Settings</string>
+    <string name="connection_title">ESP32 Connection</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="checking">Checking...</string>
+    <string name="send_notification">Send Notification</string>
+    <string name="notification_title">Title</string>
+    <string name="notification_message">Message</string>
+    <string name="clear_notification">Clear Notification</string>
+    <string name="time_sync">Time Sync</string>
+    <string name="auto_sync">Auto Sync Time</string>
+    <string name="esp_ip_address">ESP32 IP Address</string>
+    <string name="save">Save</string>
+    <string name="send">Send</string>
+    <string name="recent_notifications">Recent Notifications</string>
+    <string name="no_notifications">No notifications sent yet</string>
+    <string name="settings">Settings</string>
+    <string name="sync_interval">Sync Interval (seconds)</string>
+</resources>
