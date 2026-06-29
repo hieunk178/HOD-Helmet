@@ -2,6 +2,7 @@ package com.hudhelmet.controller.service
 
 import android.app.Notification
 import android.content.Context
+import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.graphics.drawable.Icon
@@ -17,6 +18,8 @@ import com.hudhelmet.controller.viewmodel.HudViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
 
 
 /**
@@ -29,12 +32,132 @@ import kotlinx.coroutines.launch
  */
 class HudNotificationListenerService : NotificationListenerService() {
 
+    companion object {
+        @Volatile
+        var instance: HudNotificationListenerService? = null
+            private set
+    }
+
     private val tag = "HudNotifService"
     private val scope = CoroutineScope(Dispatchers.IO)
     private val gson = Gson()
+    private val lastCallTimeMap = mutableMapOf<String, Long>()
+    private val webSocketManager = com.hudhelmet.controller.network.WebSocketManager.getInstance()
+    private var autoDiscoveryJob: kotlinx.coroutines.Job? = null
+    private var pendingNotification: com.hudhelmet.controller.model.NotificationData? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        Log.i(tag, "Service onCreate - starting background connection management")
+
+        // Start as foreground service to prevent being killed when swiped away
+        startForegroundService()
+
+        // Periodically verify connection and run UDP discovery in background if offline
+        scope.launch {
+            webSocketManager.connectionState.collect { state ->
+                Log.d(tag, "Background connection state: $state")
+                if (state == com.hudhelmet.controller.model.ConnectionState.CONNECTED) {
+                    // Send pending notification if any
+                    pendingNotification?.let { notif ->
+                        Log.i(tag, "Sending pending notification: ${notif.title}")
+                        webSocketManager.sendNotification(notif) { success ->
+                            if (success) {
+                                pendingNotification = null
+                            }
+                        }
+                    }
+                } else if (state == com.hudhelmet.controller.model.ConnectionState.DISCONNECTED ||
+                    state == com.hudhelmet.controller.model.ConnectionState.ERROR) {
+                    startAutoDiscovery()
+                }
+            }
+        }
+
+        // Trigger initial connect
+        val sharedPrefs = getSharedPreferences("hud_prefs", Context.MODE_PRIVATE)
+        val ip = sharedPrefs.getString("esp_ip_address", "192.168.4.1") ?: "192.168.4.1"
+        webSocketManager.connect(ip)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        autoDiscoveryJob?.cancel()
+        instance = null
+        Log.i(tag, "Service onDestroy - connection manager stopped")
+    }
+
+    private fun startForegroundService() {
+        val channelId = "hud_service_channel"
+        val channelName = "HUD Helmet Background Service"
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                channelId,
+                channelName,
+                android.app.NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        val notificationIntent = Intent(this, com.hudhelmet.controller.MainActivity::class.java)
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            notificationIntent,
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            }
+        )
+
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setContentTitle("HUD Helmet Active")
+            .setContentText("Duy trì kết nối mũ bảo hiểm trong nền")
+            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                startForeground(
+                    1002,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(1002, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to start foreground service: ${e.message}", e)
+        }
+    }
+
+    private fun startAutoDiscovery() {
+        if (autoDiscoveryJob?.isActive == true) return
+        val sharedPrefs = getSharedPreferences("hud_prefs", Context.MODE_PRIVATE)
+
+        autoDiscoveryJob = scope.launch {
+            while (isActive && webSocketManager.connectionState.value != com.hudhelmet.controller.model.ConnectionState.CONNECTED) {
+                Log.d(tag, "Background UDP auto-discovery run...")
+                val discoveredIp = com.hudhelmet.controller.network.UdpDiscoveryManager.discoverEspIp(3000)
+                if (discoveredIp != null) {
+                    Log.i(tag, "Background discovered ESP32 IP: $discoveredIp")
+                    sharedPrefs.edit().putString("esp_ip_address", discoveredIp).apply()
+                    webSocketManager.connect(discoveredIp)
+                    break
+                }
+                delay(5000) // 5s retry cooldown for background battery friendliness
+            }
+        }
+    }
+
     // Packages to ignore (system/noise packages)
     private val ignoredPackages = setOf(
-        packageName,                                // Our own app
         "android",
         "com.android.systemui",
         "com.android.settings",
@@ -50,6 +173,9 @@ class HudNotificationListenerService : NotificationListenerService() {
         val pkg = sbn.packageName ?: return
         val notification = sbn.notification ?: return
 
+        // Skip our own app's notifications
+        if (pkg == packageName) return
+
         // ── 1. Google Maps: handle as navigation data ───────────────────────────
         if (pkg == "com.google.android.apps.maps") {
             handleMapsNotification(sbn, sharedPrefs)
@@ -60,42 +186,104 @@ class HudNotificationListenerService : NotificationListenerService() {
         val forwardingEnabled = sharedPrefs.getBoolean("notif_forwarding_enabled", true)
         if (!forwardingEnabled) return
 
-        // Skip ignored/system packages
-        if (pkg in ignoredPackages) return
+        val category = notification.category
+        val isCall = category == Notification.CATEGORY_CALL || category == "call"
 
-        // Skip ongoing/persistent/silent notifications (e.g. media players, progress bars)
-        if (notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return
-        if (notification.flags and Notification.FLAG_NO_CLEAR != 0) return
+        // Skip ignored/system packages (except for calls)
+        if (pkg in ignoredPackages && !isCall) return
+
+        // Skip ongoing/persistent/silent notifications (except for calls)
+        if (!isCall) {
+            if (notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return
+            if (notification.flags and Notification.FLAG_NO_CLEAR != 0) return
+        }
 
         val extras = notification.extras
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
-            ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-
-        // Skip if no meaningful content
-        if (title.isNullOrBlank() && text.isNullOrBlank()) return
+        var title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+        var text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+            ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: ""
 
         // Resolve a human-readable app label for the icon/source
-        val appLabel = try {
+        var appLabel = try {
             val appInfo = packageManager.getApplicationInfo(pkg, 0)
             packageManager.getApplicationLabel(appInfo).toString()
         } catch (e: Exception) {
             pkg
         }
 
-        val notifTitle = if (!title.isNullOrBlank()) title else appLabel
-        val notifMessage = if (!text.isNullOrBlank()) text else ""
+        // Skip if no meaningful content
+        if (title.isBlank() && text.isBlank()) return
+
+        if (isCall) {
+            val textLower = text.lowercase()
+
+            // Skip ongoing/active call updates (which update the timer and would block the HUD map)
+            val isOngoing = textLower.contains("đang diễn ra") ||
+                            textLower.contains("ongoing") ||
+                            textLower.contains("đang trong cuộc gọi") ||
+                            textLower.contains("active") ||
+                            textLower.contains("mọi người trong") ||
+                            """\d+:\d+""".toRegex().containsMatchIn(textLower)
+
+            if (isOngoing) {
+                Log.d(tag, "Skipping ongoing call update for $pkg")
+                return
+            }
+
+            // Cooldown check to prevent multiple ring updates
+            val now = System.currentTimeMillis()
+            val lastSent = lastCallTimeMap[pkg] ?: 0L
+            if (now - lastSent < 15000L) {
+                Log.d(tag, "Throttling call notification from $pkg")
+                return
+            }
+            lastCallTimeMap[pkg] = now
+
+            // Override label/icon for system phone call to show the phone icon on ESP32
+            val isChatVoip = pkg.contains("zalo") || pkg.contains("facebook") || pkg.contains("messenger") ||
+                             pkg.contains("whatsapp") || pkg.contains("telegram") || pkg.contains("viber")
+            if (!isChatVoip) {
+                appLabel = "Phone" // Maps to LV_SYMBOL_CALL on ESP32
+            }
+
+            // Format call notification title in plain text to avoid emoji display errors on ESP32
+            if (!title.startsWith("[Cuộc gọi]")) {
+                title = "[Cuộc gọi] $title"
+            }
+            if (text.isBlank()) {
+                text = "Cuộc gọi đến"
+            }
+        }
+
+        val notifTitle = if (title.isNotBlank()) title else appLabel
+        val notifMessage = if (text.isNotBlank()) text else ""
 
         Log.d(tag, "Phone notification from $appLabel: title='$notifTitle', msg='$notifMessage'")
 
-        val ipAddress = sharedPrefs.getString("esp_ip_address", "192.168.4.1") ?: "192.168.4.1"
 
-        // Prefer ViewModel if app is active (so UI also shows the event)
+
+        val notificationData = com.hudhelmet.controller.model.NotificationData(title = notifTitle, message = notifMessage, icon = appLabel)
+
+        if (webSocketManager.connectionState.value == com.hudhelmet.controller.model.ConnectionState.CONNECTED) {
+            webSocketManager.sendNotification(notificationData) { success ->
+                if (success) {
+                    Log.d(tag, "Successfully forwarded notification directly: $notifTitle")
+                }
+            }
+        } else {
+            // Buffer notification
+            Log.i(tag, "WebSocket not connected. Buffering notification: $notifTitle")
+            pendingNotification = notificationData
+
+            // Force connection attempt immediately
+            val ip = sharedPrefs.getString("esp_ip_address", "192.168.4.1") ?: "192.168.4.1"
+            webSocketManager.connect(ip)
+        }
+
+        // Keep viewmodel history updated if active
         val activeVm = HudViewModel.activeViewModel
         if (activeVm != null) {
-            activeVm.sendPhoneNotification(notifTitle, notifMessage, appLabel)
-        } else {
-            Log.w(tag, "ViewModel inactive, skipping notification forward (HTTP POST removed)")
+            activeVm.addSentNotification(notifTitle, notifMessage, true)
         }
     }
 

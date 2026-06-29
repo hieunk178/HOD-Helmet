@@ -45,8 +45,14 @@ static void hud_main_task(void *pvParameter)
 
     while (1) {
         /* Run LVGL task handler for rendering and animations, but PAUSE it when streaming to prevent SPI bus contention with JPEG decoder */
-        if (http_server_get_mode() != HUD_MODE_STREAM) {
+        hud_mode_t current_mode = http_server_get_mode();
+        if (current_mode != HUD_MODE_STREAM && current_mode != HUD_MODE_MAP_NAV) {
             lv_timer_handler();
+        } else {
+            // In stream modes, only pause LVGL if stream is actively decoding frames
+            if (!hud_stream_is_active()) {
+                lv_timer_handler();
+            }
         }
 
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;

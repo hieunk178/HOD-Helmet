@@ -25,6 +25,7 @@ typedef enum {
 esp_err_t wifi_manager_init(void);
 wifi_state_t wifi_manager_get_state(void);
 void wifi_manager_get_ip(char *ip_buf, int buf_len);
+void wifi_manager_get_ssid(char *ssid_buf, int buf_len);
 
 /* API for WebSockets */
 int wifi_manager_get_saved(wifi_credential_t *out_list, int max_len);

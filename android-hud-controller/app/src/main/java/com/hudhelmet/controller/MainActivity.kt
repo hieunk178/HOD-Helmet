@@ -50,10 +50,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestLocationPermission() {
-        val permissions = arrayOf(
+        val permissions = mutableListOf(
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_FINE_LOCATION
         )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         val notGranted = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }

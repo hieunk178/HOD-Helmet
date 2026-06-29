@@ -14,6 +14,7 @@
 #include <string.h>
 #include "icons.h"
 #include "http_server.h"
+#include "hud_stream.h"
 
 static const char *TAG = "hud_render";
 
@@ -228,7 +229,8 @@ static const lv_img_dsc_t* get_img_icon(const char* icon_name) {
     for (int i = 0; lower[i]; i++) {
         if (lower[i] >= 'A' && lower[i] <= 'Z') lower[i] += 'a' - 'A';
     }
-    if (strstr(lower, "zalo") || strstr(lower, "chat")) return &icon_chat;
+    if (strstr(lower, "zalo")) return NULL; // Zalo has an empty black image in this build, fall back to envelope symbol
+    if (strstr(lower, "chat")) return &icon_chat;
     if (strstr(lower, "face")) return &icon_facebook;
     if (strstr(lower, "mess")) return &icon_messenger;
     if (strstr(lower, "tele")) return &icon_telegram;
@@ -249,7 +251,7 @@ static const char* get_icon_symbol(const char* icon_name) {
     if (strstr(lower, "zalo") || strstr(lower, "face") || strstr(lower, "mess") || strstr(lower, "chat") || strstr(lower, "mail") || strstr(lower, "gmail")) {
         return LV_SYMBOL_ENVELOPE;
     } else if (strstr(lower, "call") || strstr(lower, "phone") || strstr(lower, "dial")) {
-        return LV_SYMBOL_CALL;
+        return LV_SYMBOL_BELL; // Fall back to bell symbol because LV_SYMBOL_CALL renders as black/unsupported in this font build
     } else if (strstr(lower, "map") || strstr(lower, "nav")) {
         return LV_SYMBOL_GPS;
     } else if (strstr(lower, "music") || strstr(lower, "spot") || strstr(lower, "zing")) {
@@ -367,10 +369,12 @@ void hud_render_waiting_screen(void)
     }
 
     char ip_buf[16];
+    char ssid_buf[33];
     wifi_manager_get_ip(ip_buf, sizeof(ip_buf));
+    wifi_manager_get_ssid(ssid_buf, sizeof(ssid_buf));
 
     if (ui_Wait_Title) {
-        lv_label_set_text_fmt(ui_Wait_Title, "IP: %s", ip_buf);
+        lv_label_set_text_fmt(ui_Wait_Title, "SSID: %s\nIP: %s", ssid_buf, ip_buf);
     }
 }
 
@@ -516,6 +520,19 @@ void hud_render_stream_screen(bool first_time)
     }
 }
 
+void hud_render_map_nav_loading_screen(bool first_time)
+{
+    hud_renderer_init();
+
+    if (lv_scr_act() != ui_Screen_Stream) {
+        lv_scr_load(ui_Screen_Stream);
+    }
+
+    if (first_time && ui_Stream_Msg) {
+        lv_label_set_text(ui_Stream_Msg, "BẢN ĐỒ DẪN ĐƯỜNG\nĐang truyền hình ảnh...");
+    }
+}
+
 
 
 /* ============================================================
@@ -535,6 +552,15 @@ void hud_update(void)
 
     hud_mode_t current_mode = http_server_get_mode();
 
+    /* Check if we just exited a streaming/map mode to invalidate the screen for LVGL redraw */
+    if ((s_last_mode == HUD_MODE_STREAM || s_last_mode == HUD_MODE_MAP_NAV) && 
+        (current_mode != HUD_MODE_STREAM && current_mode != HUD_MODE_MAP_NAV)) {
+        ESP_LOGI(TAG, "Exited stream/map mode, invalidating screen for LVGL redraw");
+        hud_stream_reset_active();
+        display_clear(COLOR_BLACK);
+        lv_obj_invalidate(lv_scr_act());
+    }
+
     if (current_mode == HUD_MODE_NAV) {
         hud_nav_data_t nav;
         bool has_http_nav = http_server_get_nav(&nav);
@@ -550,6 +576,14 @@ void hud_update(void)
         }
         hud_render_stream_screen(s_stream_first);
         s_stream_first = false;
+    } else if (current_mode == HUD_MODE_MAP_NAV) {
+        static bool s_map_first = true;
+        if (s_last_mode != HUD_MODE_MAP_NAV) {
+            s_map_first = true;
+            s_last_mode = HUD_MODE_MAP_NAV;
+        }
+        hud_render_map_nav_loading_screen(s_map_first);
+        s_map_first = false;
     } else {
         /* Default mode (Standby + notification handling) */
         s_last_mode = HUD_MODE_DEFAULT;

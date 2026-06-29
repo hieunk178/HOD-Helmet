@@ -37,6 +37,11 @@ fun MainContainerScreen(
         }
     }
 
+    // Auto-connect on launch
+    LaunchedEffect(Unit) {
+        viewModel.checkConnection()
+    }
+
     Scaffold(
         snackbarHost = {
             SnackbarHost(snackbarHostState) { data ->
@@ -56,6 +61,7 @@ fun MainContainerScreen(
                         1 -> "HUD Helmet"
                         2 -> "Chỉ Đường"
                         3 -> "Stream Màn Hình"
+                        4 -> "Bản Đồ"
                         else -> "HUD Helmet"
                     }
                     Text(
@@ -116,10 +122,24 @@ fun MainContainerScreen(
                     selected = currentMode == 3,
                     onClick = { viewModel.setHudMode(3) },
                     icon = { Icon(Icons.Default.Cast, contentDescription = "Stream màn hình") },
-                    label = { Text("Screen Stream") },
+                    label = { Text("Stream") },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = HudYellow,
                         selectedTextColor = HudYellow,
+                        unselectedIconColor = TextTertiary,
+                        unselectedTextColor = TextTertiary,
+                        indicatorColor = DarkSurfaceVariant
+                    )
+                )
+
+                NavigationBarItem(
+                    selected = currentMode == 4,
+                    onClick = { viewModel.setHudMode(4) },
+                    icon = { Icon(Icons.Default.Map, contentDescription = "Bản đồ") },
+                    label = { Text("Bản đồ") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = HudGreen,
+                        selectedTextColor = HudGreen,
                         unselectedIconColor = TextTertiary,
                         unselectedTextColor = TextTertiary,
                         indicatorColor = DarkSurfaceVariant
@@ -132,12 +152,16 @@ fun MainContainerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
+                .then(
+                    if (currentMode != 4) Modifier.padding(horizontal = 16.dp)
+                    else Modifier
+                )
         ) {
             when (currentMode) {
                 1 -> HomeScreenContent(viewModel = viewModel)
                 2 -> DirectionsScreen(viewModel = viewModel)
                 3 -> StreamScreen(viewModel = viewModel)
+                4 -> MapNavigationScreen(viewModel = viewModel)
                 else -> HomeScreenContent(viewModel = viewModel)
             }
         }

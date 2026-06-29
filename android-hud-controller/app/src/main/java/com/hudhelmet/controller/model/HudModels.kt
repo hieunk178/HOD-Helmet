@@ -92,3 +92,44 @@ data class NavData(
     @SerializedName("active") val active: Boolean = true
 )
 
+/**
+ * A single lat/lon point on a route
+ */
+data class RoutePoint(
+    val lat: Double,
+    val lon: Double
+)
+
+/**
+ * A single step/instruction along a route
+ */
+data class RouteStep(
+    val instruction: String,
+    val streetName: String,
+    val distance: Double,         // meters to next step
+    val turnType: Int,            // 1=STRAIGHT, 2=LEFT, 3=RIGHT, 4=U_TURN
+    val pointIndex: Int,          // Index in polyline where step starts
+    val lat: Double,
+    val lon: Double
+)
+
+/**
+ * Complete route data from BRouter
+ */
+data class RouteData(
+    val points: List<RoutePoint>,
+    val steps: List<RouteStep>,
+    val totalDistance: Double,     // meters
+    val totalTime: Int            // seconds
+)
+
+/**
+ * Place search result from Nominatim
+ */
+data class PlaceSearchResult(
+    val displayName: String,
+    val lat: Double,
+    val lon: Double,
+    val type: String = ""
+)
+

@@ -5,85 +5,158 @@ import com.google.gson.Gson
 import com.hudhelmet.controller.model.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.*
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 
-class WebSocketManager {
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+class WebSocketManager private constructor() {
     companion object {
         private const val TAG = "WebSocketManager"
+
+        @Volatile
+        private var instance: WebSocketManager? = null
+
+        fun getInstance(): WebSocketManager {
+            return instance ?: synchronized(this) {
+                instance ?: WebSocketManager().also { instance = it }
+            }
+        }
     }
 
     private var webSocket: WebSocket? = null
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .pingInterval(10, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
     private val gson = Gson()
     private val scope = CoroutineScope(Dispatchers.IO)
+
+    private var lastConnectedIp: String? = null
+    private var userClosed = false
+    private var isConnecting = false
+    private var reconnectJob: Job? = null
+
+    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     var isConnected = false
         private set
 
-    var onConnectionStateChanged: ((Boolean) -> Unit)? = null
+    var onConnectionStateChanged: ((ConnectionState) -> Unit)? = null
     var onWifiScanResult: ((List<WifiNetwork>) -> Unit)? = null
     var onWifiListSaved: ((List<WifiNetwork>) -> Unit)? = null
 
     fun connect(ipAddress: String) {
-        if (isConnected) return
+        if (isConnected || isConnecting) {
+            if (lastConnectedIp == ipAddress) {
+                return
+            } else {
+                disconnect()
+            }
+        }
+
+        userClosed = false
+        lastConnectedIp = ipAddress
+        isConnecting = true
+        _connectionState.value = ConnectionState.CONNECTING
+        reconnectJob?.cancel()
 
         val url = "ws://$ipAddress/ws"
         Log.i(TAG, "Connecting to WebSocket: $url")
 
-        val request = Request.Builder().url(url).build()
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WebSocket Opened")
-                isConnected = true
-                onConnectionStateChanged?.invoke(true)
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                Log.d(TAG, "WebSocket Msg: $text")
-                try {
-                    val root = com.google.gson.JsonParser.parseString(text).asJsonObject
-                    if (root.has("cmd")) {
-                        val cmd = root.get("cmd").asString
-                        if (cmd == "wifi_scan_result" || cmd == "wifi_list_saved") {
-                            val networksArray = root.getAsJsonArray("networks")
-                            val list = mutableListOf<WifiNetwork>()
-                            for (i in 0 until networksArray.size()) {
-                                val item = networksArray[i].asJsonObject
-                                val ssid = item.get("ssid").asString
-                                val rssi = if (item.has("rssi")) item.get("rssi").asInt else 0
-                                list.add(WifiNetwork(ssid, rssi))
-                            }
-                            if (cmd == "wifi_scan_result") onWifiScanResult?.invoke(list)
-                            else onWifiListSaved?.invoke(list)
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error parsing WS message", e)
+        try {
+            val request = Request.Builder().url(url).build()
+            webSocket = client.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.i(TAG, "WebSocket Opened")
+                    isConnected = true
+                    isConnecting = false
+                    _connectionState.value = ConnectionState.CONNECTED
+                    onConnectionStateChanged?.invoke(ConnectionState.CONNECTED)
                 }
-            }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "WebSocket Closed: $reason")
-                isConnected = false
-                onConnectionStateChanged?.invoke(false)
-            }
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    Log.d(TAG, "WebSocket Msg: $text")
+                    try {
+                        val root = com.google.gson.JsonParser.parseString(text).asJsonObject
+                        if (root.has("cmd")) {
+                            val cmd = root.get("cmd").asString
+                            if (cmd == "wifi_scan_result" || cmd == "wifi_list_saved") {
+                                val networksArray = root.getAsJsonArray("networks")
+                                val list = mutableListOf<WifiNetwork>()
+                                for (i in 0 until networksArray.size()) {
+                                    val item = networksArray[i].asJsonObject
+                                    val ssid = item.get("ssid").asString
+                                    val rssi = if (item.has("rssi")) item.get("rssi").asInt else 0
+                                    list.add(WifiNetwork(ssid, rssi))
+                                }
+                                if (cmd == "wifi_scan_result") onWifiScanResult?.invoke(list)
+                                else onWifiListSaved?.invoke(list)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error parsing WS message", e)
+                    }
+                }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket Failure", t)
-                isConnected = false
-                onConnectionStateChanged?.invoke(false)
-            }
-        })
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    Log.i(TAG, "WebSocket Closed: $reason")
+                    isConnected = false
+                    isConnecting = false
+                    _connectionState.value = ConnectionState.DISCONNECTED
+                    onConnectionStateChanged?.invoke(ConnectionState.DISCONNECTED)
+                    attemptReconnect()
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    Log.e(TAG, "WebSocket Failure", t)
+                    isConnected = false
+                    isConnecting = false
+                    _connectionState.value = ConnectionState.ERROR
+                    onConnectionStateChanged?.invoke(ConnectionState.ERROR)
+                    attemptReconnect()
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initiating web socket connection", e)
+            isConnecting = false
+            isConnected = false
+            _connectionState.value = ConnectionState.ERROR
+            onConnectionStateChanged?.invoke(ConnectionState.ERROR)
+            attemptReconnect()
+        }
     }
 
     fun disconnect() {
+        userClosed = true
+        reconnectJob?.cancel()
         webSocket?.close(1000, "Normal closure")
         webSocket = null
         isConnected = false
-        onConnectionStateChanged?.invoke(false)
+        isConnecting = false
+        _connectionState.value = ConnectionState.DISCONNECTED
+        onConnectionStateChanged?.invoke(ConnectionState.DISCONNECTED)
+    }
+
+    private fun attemptReconnect() {
+        if (userClosed || lastConnectedIp == null) return
+
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(3000)
+            if (!userClosed && !isConnected && !isConnecting) {
+                Log.i(TAG, "Auto-reconnecting to $lastConnectedIp...")
+                _connectionState.value = ConnectionState.CONNECTING
+                onConnectionStateChanged?.invoke(ConnectionState.CONNECTING)
+                connect(lastConnectedIp!!)
+            }
+        }
     }
 
     private fun sendJson(cmd: String, data: Any, callback: ((Boolean) -> Unit)? = null) {
@@ -142,6 +215,10 @@ class WebSocketManager {
 
     fun sendMode(modeData: ModeData, callback: (Boolean) -> Unit) {
         sendJson("mode", modeData, callback)
+    }
+
+    fun sendStopNav(callback: ((Boolean) -> Unit)? = null) {
+        sendJson("stop_nav", Any(), callback)
     }
 
     fun sendNav(navData: NavData, callback: (Boolean) -> Unit) {

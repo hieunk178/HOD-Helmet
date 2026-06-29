@@ -29,5 +29,7 @@ void hud_stream_init(void);
  * @brief Get the current stream configuration.
  */
 void hud_stream_get_config(hud_stream_config_t *out_config);
+bool hud_stream_is_active(void);
+void hud_stream_reset_active(void);
 
 #endif /* HUD_STREAM_H */

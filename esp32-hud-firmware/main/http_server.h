@@ -91,7 +91,8 @@ void http_server_update_notification(const hud_notification_t *notif);
 typedef enum {
     HUD_MODE_DEFAULT = 1,
     HUD_MODE_NAV = 2,
-    HUD_MODE_STREAM = 3
+    HUD_MODE_STREAM = 3,
+    HUD_MODE_MAP_NAV = 4
 } hud_mode_t;
 
 /* Navigation Instructions from Phone */

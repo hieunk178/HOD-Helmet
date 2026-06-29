@@ -46,6 +46,7 @@ static hud_stream_config_t s_config = {
 
 static SemaphoreHandle_t s_config_mutex = NULL;
 static SemaphoreHandle_t s_frame_sem = NULL;
+static uint32_t s_last_packet_time = 0;
 
 extern TaskHandle_t s_display_task_handle; // Defined in display_driver.c
 
@@ -53,6 +54,27 @@ extern TaskHandle_t s_display_task_handle; // Defined in display_driver.c
 void hud_stream_get_config(hud_stream_config_t *out_config) {
     if (s_config_mutex && xSemaphoreTake(s_config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         *out_config = s_config;
+        xSemaphoreGive(s_config_mutex);
+    }
+}
+
+bool hud_stream_is_active(void) {
+    bool active = false;
+    if (s_config_mutex && xSemaphoreTake(s_config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        // If stream is active but we haven't received packets for 2 seconds, mark as inactive
+        if (s_config.active && (now - s_last_packet_time > 2000)) {
+            s_config.active = false;
+        }
+        active = s_config.active;
+        xSemaphoreGive(s_config_mutex);
+    }
+    return active;
+}
+
+void hud_stream_reset_active(void) {
+    if (s_config_mutex && xSemaphoreTake(s_config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_config.active = false;
         xSemaphoreGive(s_config_mutex);
     }
 }
@@ -125,8 +147,12 @@ static UINT jpeg_output_func(JDEC *jd, void *bitmap, JRECT *rect) {
 static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
     if (size == 0) return;
     
-    #define WORK_BUF_SIZE 3100
-    uint8_t work_buf[WORK_BUF_SIZE];
+    #define WORK_BUF_SIZE 5120
+    uint8_t *work_buf = malloc(WORK_BUF_SIZE);
+    if (!work_buf) {
+        ESP_LOGE(TAG, "Failed to allocate decoder work buffer");
+        return;
+    }
     
     jpeg_stream_t stream = {
         .data = jpeg_data,
@@ -138,6 +164,7 @@ static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
     JRESULT res = jd_prepare(&jd, jpeg_input_func, work_buf, WORK_BUF_SIZE, &stream);
     if (res != JDR_OK) {
         ESP_LOGE(TAG, "jd_prepare failed: %d", res);
+        free(work_buf);
         return;
     }
     
@@ -150,6 +177,8 @@ static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
         hud_stream_get_config(&cfg);
         display_draw_bitmap(cfg.drawX, cfg.drawY, cfg.outW, cfg.outH, s_frame_pixel_buf);
     }
+    
+    free(work_buf);
 }
 
 static void hud_stream_display_task(void *pvParameters) {
@@ -182,7 +211,7 @@ static void hud_stream_display_task(void *pvParameters) {
             if (s_frame_ready) {
                 // Only decode if we are in stream mode!
                 hud_mode_t current_mode = http_server_get_mode();
-                if (current_mode == HUD_MODE_STREAM) {
+                if (current_mode == HUD_MODE_STREAM || current_mode == HUD_MODE_MAP_NAV) {
                     s_display_busy = true;
                     decode_and_draw_jpeg(s_read_buf, s_read_size);
                     s_display_busy = false;
@@ -216,6 +245,12 @@ static void hud_stream_rx_task(void *pvParameters) {
         return;
     }
     
+    // Increase socket receive buffer size to prevent dropping packets
+    int rcv_buf_size = 32768;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcv_buf_size, sizeof(rcv_buf_size)) < 0) {
+        ESP_LOGW(TAG, "Failed to set socket receive buffer size: %d", errno);
+    }
+    
     // Allocate rx buffer (15 bytes header + max 1024 bytes payload)
     #define RX_BUF_SIZE 2048
     uint8_t rx_buf[RX_BUF_SIZE];
@@ -241,6 +276,8 @@ static void hud_stream_rx_task(void *pvParameters) {
         if (magic0 != 0x53 || magic1 != 0x54) { // 'S', 'T'
             continue;
         }
+        
+        s_last_packet_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
         uint8_t type = rx_buf[2];
         uint16_t stream_id = (rx_buf[3] << 8) | rx_buf[4];
@@ -286,8 +323,9 @@ static void hud_stream_rx_task(void *pvParameters) {
         }
         
         if (type == 2) { // DATA / CHUNK Packet
-            // If not in stream mode, discard
-            if (http_server_get_mode() != HUD_MODE_STREAM) {
+            // If not in stream or map nav mode, discard
+            hud_mode_t cur_mode = http_server_get_mode();
+            if (cur_mode != HUD_MODE_STREAM && cur_mode != HUD_MODE_MAP_NAV) {
                 continue;
             }
             

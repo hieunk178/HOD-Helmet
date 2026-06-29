@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
+#include "lwip/sockets.h"
 
 static const char *TAG = "wifi_mgr";
 
@@ -21,6 +22,7 @@ static esp_netif_t *s_netif_sta = NULL;
 static esp_netif_t *s_netif_ap = NULL;
 
 static wifi_scan_cb_t s_scan_cb = NULL;
+static int s_reconnect_retries = 0;
 
 static void load_networks_from_nvs(void) {
     nvs_handle_t nvs;
@@ -90,21 +92,37 @@ static void try_connect_next(void) {
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        s_reconnect_retries = 0;
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_state == WIFI_STATE_CONNECTED_STA) {
+            ESP_LOGW(TAG, "Disconnected from STA. Transitioning to reconnecting...");
+            s_state = WIFI_STATE_CONNECTING;
+            s_current_try_index = 0;
+            s_reconnect_retries = 0;
+        }
+        
         if (s_state == WIFI_STATE_CONNECTING) {
-            ESP_LOGW(TAG, "Connect failed to %s", s_saved_networks[s_current_try_index].ssid);
-            s_current_try_index++;
-            try_connect_next();
-        } else if (s_state == WIFI_STATE_CONNECTED_STA) {
-            ESP_LOGW(TAG, "Disconnected from STA. Reconnecting...");
-            esp_wifi_connect();
+            if (s_reconnect_retries < 3) {
+                s_reconnect_retries++;
+                ESP_LOGI(TAG, "Connection/Reconnection attempt %d/3 to %s...", 
+                         s_reconnect_retries, s_saved_networks[s_current_try_index].ssid);
+                esp_wifi_connect();
+            } else {
+                ESP_LOGW(TAG, "Failed to connect to %s after 3 attempts.", s_saved_networks[s_current_try_index].ssid);
+                s_reconnect_retries = 0;
+                s_current_try_index++;
+                try_connect_next();
+            }
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         snprintf(s_ip_address, sizeof(s_ip_address), IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "Connected! IP: %s", s_ip_address);
         s_state = WIFI_STATE_CONNECTED_STA;
+        
+        // Disable Wi-Fi power save to maximize UDP throughput for video streaming
+        esp_wifi_set_ps(WIFI_PS_NONE);
         
         // Move connected network to front of list (index 0)
         if (s_current_try_index > 0) {
@@ -116,6 +134,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             save_networks_to_nvs();
         }
         s_current_try_index = 0;
+        s_reconnect_retries = 0;
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
         uint16_t ap_count = 0;
         esp_wifi_scan_get_ap_num(&ap_count);
@@ -127,6 +146,30 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             s_scan_cb = NULL;
         }
         free(ap_info);
+    }
+}
+
+static void udp_discovery_task(void *pvParameters) {
+    while (1) {
+        if (s_state == WIFI_STATE_CONNECTED_STA || s_state == WIFI_STATE_AP_MODE) {
+            int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+            if (sock >= 0) {
+                int broadcastEnable = 1;
+                setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable));
+                
+                struct sockaddr_in dest_addr;
+                dest_addr.sin_family = AF_INET;
+                dest_addr.sin_port = htons(8888);
+                dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+                
+                char payload[64];
+                snprintf(payload, sizeof(payload), "HUD_HELMET_IP:%s", s_ip_address);
+                
+                sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                close(sock);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -145,6 +188,8 @@ esp_err_t wifi_manager_init(void) {
     
     load_networks_from_nvs();
     
+    xTaskCreate(udp_discovery_task, "udp_disc", 2048, NULL, 5, NULL);
+    
     if (s_num_saved == 0) {
         start_softap();
     } else {
@@ -161,6 +206,18 @@ wifi_state_t wifi_manager_get_state(void) {
 void wifi_manager_get_ip(char *ip_buf, int buf_len) {
     if (ip_buf && buf_len > 0) {
         strlcpy(ip_buf, s_ip_address, buf_len);
+    }
+}
+
+void wifi_manager_get_ssid(char *ssid_buf, int buf_len) {
+    if (ssid_buf && buf_len > 0) {
+        if (s_state == WIFI_STATE_CONNECTED_STA) {
+            strlcpy(ssid_buf, s_saved_networks[0].ssid, buf_len);
+        } else if (s_state == WIFI_STATE_AP_MODE) {
+            strlcpy(ssid_buf, "HUD_Helmet_AP", buf_len);
+        } else {
+            strlcpy(ssid_buf, "Not Connected", buf_len);
+        }
     }
 }
 

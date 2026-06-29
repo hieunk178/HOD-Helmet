@@ -8,6 +8,7 @@
 #include "http_server.h"
 #include "wifi_manager.h"
 #include "esp_wifi.h"
+#include "hud_stream.h"
 
 #include "esp_http_server.h"
 #include "cJSON.h"
@@ -225,9 +226,11 @@ static esp_err_t ws_handler(httpd_req_t *req) {
                         }
                     } else if (strcmp(cmd->valuestring, "clear_notif") == 0) {
                         http_server_clear_notification();
+                    } else if (strcmp(cmd->valuestring, "stop_nav") == 0) {
+                        hud_stream_reset_active();
                     } else if (strcmp(cmd->valuestring, "mode") == 0) {
                         cJSON *mode = cJSON_GetObjectItem(root, "mode");
-                        if (cJSON_IsNumber(mode) && mode->valueint >= 1 && mode->valueint <= 3) {
+                        if (cJSON_IsNumber(mode) && mode->valueint >= 1 && mode->valueint <= 4) {
                             http_server_update_mode((hud_mode_t)mode->valueint);
                         }
                     } else if (strcmp(cmd->valuestring, "nav") == 0) {
@@ -460,6 +463,10 @@ void http_server_update_mode(hud_mode_t mode)
         s_hud_mode = mode;
         xSemaphoreGive(s_data_mutex);
         ESP_LOGI(TAG, "HUD Operating Mode updated: %d", (int)mode);
+        
+        if (mode != HUD_MODE_STREAM && mode != HUD_MODE_MAP_NAV) {
+            hud_stream_reset_active();
+        }
     }
 }
 

@@ -320,6 +320,13 @@ class ScreenCaptureService : Service() {
 
             val datagram = DatagramPacket(packetBytes, packetBytes.size, address, UDP_PORT)
             socket.send(datagram)
+            
+            // Add a tiny delay to prevent UDP buffer overflow on ESP32
+            try {
+                Thread.sleep(1)
+            } catch (e: InterruptedException) {
+                // ignore
+            }
         }
     }
 
