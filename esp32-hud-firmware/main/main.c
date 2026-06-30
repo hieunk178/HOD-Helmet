@@ -116,7 +116,7 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "[1/5] NVS Flash initialized");
+    ESP_LOGI(TAG, "[1/6] NVS Flash initialized");
 
     /* Step 2: Initialize display */
     ret = display_init();
@@ -124,29 +124,29 @@ void app_main(void)
         ESP_LOGE(TAG, "Display init failed! Check wiring.");
         /* Continue without display - WiFi/HTTP still works */
     } else {
-        ESP_LOGI(TAG, "[2/5] Display initialized (160x80 ST7735)");
+        ESP_LOGI(TAG, "[2/6] Display initialized (160x80 ST7735)");
     }
 
     /* Step 3: Show boot screen */
     hud_render_boot_screen(CONFIG_ESP_WIFI_SSID);
-    ESP_LOGI(TAG, "[3/5] Boot screen displayed");
+    ESP_LOGI(TAG, "[3/6] Boot screen displayed");
 
     /* Step 4: Connect to WiFi */
-    ESP_LOGI(TAG, "[4/5] Starting Smart WiFi Manager...");
+    ESP_LOGI(TAG, "[4/6] Starting Smart WiFi Manager...");
     ret = wifi_manager_init();
     if (ret == ESP_OK) {
         hud_renderer_init();
         hud_render_wifi_status(false, NULL);
     } else {
-        ESP_LOGE(TAG, "[4/5] WiFi manager failed to initialize.");
+        ESP_LOGE(TAG, "[4/6] WiFi manager failed to initialize.");
     }
 
     /* Step 5: Start HTTP server */
     ret = http_server_start();
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "[5/5] HTTP server started");
+        ESP_LOGI(TAG, "[5/6] HTTP server started");
     } else {
-        ESP_LOGE(TAG, "[5/5] HTTP server failed to start");
+        ESP_LOGE(TAG, "[5/6] HTTP server failed to start");
     }
 
     /* Initialize Screen Streaming UDP/Display Tasks */

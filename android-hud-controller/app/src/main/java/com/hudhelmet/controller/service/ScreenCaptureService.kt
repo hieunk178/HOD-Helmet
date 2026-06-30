@@ -4,6 +4,7 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -198,6 +199,12 @@ class ScreenCaptureService : Service() {
                 var frameId: Short = 0
                 val streamId: Short = 1
 
+                // Pre-allocate reusable bitmaps and buffer to reduce GC pressure
+                var reusableFullBmp: Bitmap? = null
+                val reusableScaledBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                val scaledCanvas = Canvas(reusableScaledBmp)
+                val baos = ByteArrayOutputStream(outW * outH)  // Reuse across frames
+
                 while (isActive) {
                     val startTime = System.currentTimeMillis()
                     val img = reader.acquireLatestImage()
@@ -213,26 +220,31 @@ class ScreenCaptureService : Service() {
                             val rawHeight = img.height
 
                             val bufferWidth = rawWidth + (rowStride - rawWidth * pixelStride) / pixelStride
-                            val bmp = Bitmap.createBitmap(bufferWidth, rawHeight, Bitmap.Config.ARGB_8888)
-                            bmp.copyPixelsFromBuffer(buffer)
+
+                            // Reuse full bitmap if dimensions match
+                            if (reusableFullBmp == null || reusableFullBmp!!.width != bufferWidth || reusableFullBmp!!.height != rawHeight) {
+                                reusableFullBmp?.recycle()
+                                reusableFullBmp = Bitmap.createBitmap(bufferWidth, rawHeight, Bitmap.Config.ARGB_8888)
+                            }
+                            buffer.rewind()
+                            reusableFullBmp!!.copyPixelsFromBuffer(buffer)
 
                             val cx = cropX.coerceIn(0, rawWidth - 1)
                             val cy = cropY.coerceIn(0, rawHeight - 1)
                             val cw = cropW.coerceIn(1, rawWidth - cx)
                             val ch = cropH.coerceIn(1, rawHeight - cy)
 
-                            val cropped = Bitmap.createBitmap(bmp, cx, cy, cw, ch)
-                            bmp.recycle()
+                            // Draw cropped+scaled directly onto reusable bitmap
+                            scaledCanvas.drawBitmap(
+                                reusableFullBmp!!,
+                                android.graphics.Rect(cx, cy, cx + cw, cy + ch),
+                                android.graphics.Rect(0, 0, outW, outH),
+                                null
+                            )
 
-                            val scaled = Bitmap.createScaledBitmap(cropped, outW, outH, true)
-                            if (scaled != cropped) {
-                                cropped.recycle()
-                            }
-
-                            val baos = ByteArrayOutputStream()
-                            scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                            baos.reset()  // Reuse buffer
+                            reusableScaledBmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
                             val jpegBytes = baos.toByteArray()
-                            scaled.recycle()
 
                             sendFrameChunks(socket, espAddress, streamId, frameId, jpegBytes)
                             frameId = ((frameId + 1) % 65536).toShort()
@@ -253,6 +265,8 @@ class ScreenCaptureService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming thread error: ${e.message}")
             } finally {
+                reusableFullBmp?.recycle()
+                reusableScaledBmp.recycle()
                 socket?.close()
             }
         }

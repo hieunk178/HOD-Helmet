@@ -14,9 +14,10 @@ import android.util.Log
 import com.google.gson.Gson
 import com.hudhelmet.controller.model.NavData
 import com.hudhelmet.controller.model.NotificationData
-import com.hudhelmet.controller.viewmodel.HudViewModel
+import com.hudhelmet.controller.event.HudEventBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
@@ -39,12 +40,12 @@ class HudNotificationListenerService : NotificationListenerService() {
     }
 
     private val tag = "HudNotifService"
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gson = Gson()
     private val lastCallTimeMap = mutableMapOf<String, Long>()
     private val webSocketManager = com.hudhelmet.controller.network.WebSocketManager.getInstance()
     private var autoDiscoveryJob: kotlinx.coroutines.Job? = null
-    private var pendingNotification: com.hudhelmet.controller.model.NotificationData? = null
+    private val pendingNotifications = java.util.concurrent.ConcurrentLinkedQueue<com.hudhelmet.controller.model.NotificationData>()
 
     override fun onCreate() {
         super.onCreate()
@@ -59,14 +60,16 @@ class HudNotificationListenerService : NotificationListenerService() {
             webSocketManager.connectionState.collect { state ->
                 Log.d(tag, "Background connection state: $state")
                 if (state == com.hudhelmet.controller.model.ConnectionState.CONNECTED) {
-                    // Send pending notification if any
-                    pendingNotification?.let { notif ->
+                    // Drain pending notifications queue
+                    while (pendingNotifications.isNotEmpty()) {
+                        val notif = pendingNotifications.peek() ?: break
                         Log.i(tag, "Sending pending notification: ${notif.title}")
                         webSocketManager.sendNotification(notif) { success ->
                             if (success) {
-                                pendingNotification = null
+                                pendingNotifications.poll()
                             }
                         }
+                        delay(200) // Small delay between sends to avoid flooding
                     }
                 } else if (state == com.hudhelmet.controller.model.ConnectionState.DISCONNECTED ||
                     state == com.hudhelmet.controller.model.ConnectionState.ERROR) {
@@ -271,19 +274,20 @@ class HudNotificationListenerService : NotificationListenerService() {
                 }
             }
         } else {
-            // Buffer notification
+            // Buffer notification (max 10 to prevent unbounded growth)
             Log.i(tag, "WebSocket not connected. Buffering notification: $notifTitle")
-            pendingNotification = notificationData
+            if (pendingNotifications.size < 10) {
+                pendingNotifications.add(notificationData)
+            }
 
             // Force connection attempt immediately
             val ip = sharedPrefs.getString("esp_ip_address", "192.168.4.1") ?: "192.168.4.1"
             webSocketManager.connect(ip)
         }
 
-        // Keep viewmodel history updated if active
-        val activeVm = HudViewModel.activeViewModel
-        if (activeVm != null) {
-            activeVm.addSentNotification(notifTitle, notifMessage, true)
+        // Notify ViewModel via event bus (decoupled, no memory leak)
+        scope.launch {
+            HudEventBus.emitNotificationSent(notifTitle, notifMessage, true)
         }
     }
 
@@ -308,34 +312,31 @@ class HudNotificationListenerService : NotificationListenerService() {
         val navData = parseNavigationNotification(title, text, subText) ?: return
         Log.i(tag, "Parsed nav: $navData")
 
-        val activeVm = HudViewModel.activeViewModel
-        if (activeVm != null) {
-            activeVm.sendNavData(navData)
-            
-            val iconObj = extras.getParcelable<Parcelable>(Notification.EXTRA_LARGE_ICON)
-            var bitmap: Bitmap? = null
-            if (iconObj is Icon) {
-                val drawable = iconObj.loadDrawable(this)
-                if (drawable is BitmapDrawable) {
-                    bitmap = drawable.bitmap
-                } else if (drawable != null) {
-                    bitmap = Bitmap.createBitmap(
-                        drawable.intrinsicWidth.coerceAtLeast(1),
-                        drawable.intrinsicHeight.coerceAtLeast(1),
-                        Bitmap.Config.ARGB_8888
-                    )
-                    val canvas = Canvas(bitmap)
-                    drawable.setBounds(0, 0, canvas.width, canvas.height)
-                    drawable.draw(canvas)
-                }
-            } else if (iconObj is Bitmap) {
-                bitmap = iconObj
+        // Extract icon bitmap
+        val iconObj = extras.getParcelable<Parcelable>(Notification.EXTRA_LARGE_ICON)
+        var bitmap: Bitmap? = null
+        if (iconObj is Icon) {
+            val drawable = iconObj.loadDrawable(this)
+            if (drawable is BitmapDrawable) {
+                bitmap = drawable.bitmap
+            } else if (drawable != null) {
+                bitmap = Bitmap.createBitmap(
+                    drawable.intrinsicWidth.coerceAtLeast(1),
+                    drawable.intrinsicHeight.coerceAtLeast(1),
+                    Bitmap.Config.ARGB_8888
+                )
+                val canvas = Canvas(bitmap)
+                drawable.setBounds(0, 0, canvas.width, canvas.height)
+                drawable.draw(canvas)
             }
-            if (bitmap != null) {
-                activeVm.sendNavIcon(bitmap)
-            }
-        } else {
-            Log.w(tag, "ViewModel inactive, skipping nav data forward (HTTP POST removed)")
+        } else if (iconObj is Bitmap) {
+            bitmap = iconObj
+        }
+
+        // Send nav data via WebSocket directly and notify ViewModel via event bus
+        webSocketManager.sendNav(navData) { }
+        scope.launch {
+            HudEventBus.emitNavData(navData, bitmap)
         }
     }
 
@@ -343,11 +344,8 @@ class HudNotificationListenerService : NotificationListenerService() {
         if (sbn == null || sbn.packageName != "com.google.android.apps.maps") return
         Log.d(tag, "Google Maps notification removed")
 
-        val activeVm = HudViewModel.activeViewModel
-        if (activeVm != null) {
-            activeVm.clearNavData()
-        } else {
-            Log.w(tag, "ViewModel inactive, skipping nav clear (HTTP POST removed)")
+        scope.launch {
+            HudEventBus.emitNavClear()
         }
     }
 

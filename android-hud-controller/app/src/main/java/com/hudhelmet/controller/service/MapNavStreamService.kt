@@ -12,7 +12,7 @@ import com.hudhelmet.controller.model.RoutePoint
 import com.hudhelmet.controller.model.RouteData
 import com.hudhelmet.controller.model.NavData
 import com.hudhelmet.controller.model.NotificationData
-import com.hudhelmet.controller.viewmodel.HudViewModel
+import com.hudhelmet.controller.event.HudEventBus
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.net.DatagramPacket
@@ -208,10 +208,9 @@ class MapNavStreamService : Service() {
         // Send nav data to ESP32 (throttled)
         sendNavDataThrottled(update.navData)
 
-        // Update active viewmodel if available
-        val vm = HudViewModel.activeViewModel
-        if (vm != null) {
-            vm.updateNavigationStateFromService(
+        // Notify ViewModel via event bus (decoupled)
+        scope.launch {
+            HudEventBus.emitNavigationStateUpdate(
                 currentLocation = point,
                 currentSpeed = location.speed * 3.6f,
                 currentBearing = if (location.hasBearing()) location.bearing else currentBearing,
@@ -247,9 +246,8 @@ class MapNavStreamService : Service() {
                                 socket?.close()
                             }
 
-                            // Update active viewmodel if open
-                            val activeVm = HudViewModel.activeViewModel
-                            activeVm?.updateRouteFromService(newRoute)
+                            // Notify ViewModel via event bus
+                            HudEventBus.emitRouteUpdate(newRoute)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Rerouting error", e)
@@ -260,21 +258,20 @@ class MapNavStreamService : Service() {
 
         // Handle arrival
         if (update.hasArrived) {
-            if (vm != null) {
-                vm.handleArrival()
-            } else {
-                // Fallback direct teardown if app is closed
-                com.hudhelmet.controller.network.WebSocketManager.getInstance().sendNotification(
-                    NotificationData(title = "Bản đồ", message = "Đã đến nơi!", icon = "check")
-                ) { }
-                
-                // Clear nav data on ESP32
-                val emptyNav = NavData(street = "", instruction = "", distance = 0, turnType = 1, active = false)
-                com.hudhelmet.controller.network.WebSocketManager.getInstance().sendNav(emptyNav) { }
-                com.hudhelmet.controller.network.WebSocketManager.getInstance().sendStopNav()
-                com.hudhelmet.controller.network.WebSocketManager.getInstance().sendMode(com.hudhelmet.controller.model.ModeData(1)) { }
-                stopSelf()
+            // Always send arrival commands to ESP32
+            com.hudhelmet.controller.network.WebSocketManager.getInstance().sendNotification(
+                NotificationData(title = "Bản đồ", message = "Đã đến nơi!", icon = "check")
+            ) { }
+            val emptyNav = NavData(street = "", instruction = "", distance = 0, turnType = 1, active = false)
+            com.hudhelmet.controller.network.WebSocketManager.getInstance().sendNav(emptyNav) { }
+            com.hudhelmet.controller.network.WebSocketManager.getInstance().sendStopNav()
+            com.hudhelmet.controller.network.WebSocketManager.getInstance().sendMode(com.hudhelmet.controller.model.ModeData(1)) { }
+
+            // Notify ViewModel via event bus
+            scope.launch {
+                HudEventBus.emitArrival()
             }
+            stopSelf()
         }
     }
 
@@ -293,25 +290,25 @@ class MapNavStreamService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action == "STOP") {
-            val vm = HudViewModel.activeViewModel
-            if (vm != null && vm.isNavigating.value) {
-                vm.stopNavigation()
-            } else {
-                // App is closed, send stop commands directly from service to clear ESP32 screen
-                val ws = com.hudhelmet.controller.network.WebSocketManager.getInstance()
-                val emptyNav = NavData(street = "", instruction = "", distance = 0, turnType = 1, active = false)
-                ws.sendNav(emptyNav) { }
-                ws.sendStopNav()
-                ws.sendMode(com.hudhelmet.controller.model.ModeData(1)) { }
+            // Send stop commands to ESP32
+            val ws = com.hudhelmet.controller.network.WebSocketManager.getInstance()
+            val emptyNav = NavData(street = "", instruction = "", distance = 0, turnType = 1, active = false)
+            ws.sendNav(emptyNav) { }
+            ws.sendStopNav()
+            ws.sendMode(com.hudhelmet.controller.model.ModeData(1)) { }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                } else {
-                    @Suppress("DEPRECATION")
-                    stopForeground(true)
-                }
-                stopSelf()
+            // Notify ViewModel via event bus
+            scope.launch {
+                HudEventBus.emitArrival()
             }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
             return START_NOT_STICKY
         }
 
@@ -407,6 +404,7 @@ class MapNavStreamService : Service() {
 
                 val bitmap = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bitmap)
+                val baos = ByteArrayOutputStream(240 * 240)  // Pre-allocated, reused across frames
 
                 var frameId: Short = 0
                 val streamId: Short = 2
@@ -439,8 +437,8 @@ class MapNavStreamService : Service() {
                         // Render Minimap with smoothed bearing
                         renderMinimapFrame(canvas, curRoute.points, curLoc, currentRenderBearing, speed, navUpdate)
 
-                        // Compress
-                        val baos = ByteArrayOutputStream()
+                        // Compress (reuse buffer)
+                        baos.reset()
                         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)
                         val jpegBytes = baos.toByteArray()
 

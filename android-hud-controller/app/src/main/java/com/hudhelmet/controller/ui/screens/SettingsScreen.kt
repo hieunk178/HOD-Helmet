@@ -1,5 +1,6 @@
 package com.hudhelmet.controller.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -35,6 +36,7 @@ fun SettingsScreen(
     val autoSyncEnabled by viewModel.autoSyncEnabled.collectAsState()
     val notifForwardingEnabled by viewModel.notifForwardingEnabled.collectAsState()
     val navigationEnabled by viewModel.navigationEnabled.collectAsState()
+    val displayBrightness by viewModel.displayBrightness.collectAsState()
 
     var editableIp by remember { mutableStateOf(ipAddress) }
     var editableSyncInterval by remember { mutableStateOf(syncInterval.toString()) }
@@ -343,6 +345,115 @@ fun SettingsScreen(
                             uncheckedTrackColor = DarkSurfaceVariant,
                         )
                     )
+                }
+            }
+
+            // ---- Display Brightness Section ----
+            SettingsSectionCard(
+                icon = Icons.Default.BrightnessHigh,
+                title = "Độ sáng màn hình",
+                iconTint = HudYellow
+            ) {
+                // Brightness value display
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DarkSurfaceVariant)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.BrightnessLow,
+                            contentDescription = null,
+                            tint = TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Độ sáng",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = TextPrimary
+                        )
+                    }
+                    Text(
+                        text = "$displayBrightness%",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = HudYellow
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Brightness slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.BrightnessLow,
+                        contentDescription = "Min",
+                        tint = TextTertiary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Slider(
+                        value = displayBrightness.toFloat(),
+                        onValueChange = { viewModel.setDisplayBrightness(it.toInt()) },
+                        valueRange = 5f..100f,
+                        steps = 18,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = HudYellow,
+                            activeTrackColor = HudYellow,
+                            inactiveTrackColor = DarkSurfaceVariant,
+                            activeTickColor = HudYellow.copy(alpha = 0.5f),
+                            inactiveTickColor = DarkSurfaceVariant
+                        )
+                    )
+                    Icon(
+                        Icons.Default.BrightnessHigh,
+                        contentDescription = "Max",
+                        tint = HudYellow,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Quick brightness buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(25, 50, 75, 100).forEach { level ->
+                        OutlinedButton(
+                            onClick = { viewModel.setDisplayBrightness(level) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = if (displayBrightness == level) HudYellow else TextSecondary,
+                                containerColor = if (displayBrightness == level) HudYellow.copy(alpha = 0.1f) else DarkSurfaceVariant
+                            ),
+                            border = if (displayBrightness == level) {
+                                BorderStroke(1.dp, HudYellow)
+                            } else {
+                                BorderStroke(1.dp, DarkCardBorder)
+                            },
+                            contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
+                        ) {
+                            Text(
+                                text = "$level%",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = if (displayBrightness == level) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
                 }
             }
 

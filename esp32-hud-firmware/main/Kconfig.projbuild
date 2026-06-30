@@ -68,5 +68,20 @@ menu "HUD Helmet Configuration"
         help
             Time in seconds before a notification is automatically dismissed from the HUD display.
 
+    config HUD_DEFAULT_BRIGHTNESS
+        int "Default display brightness (0-100%)"
+        range 0 100
+        default 100
+        help
+            Default backlight brightness level at boot.
+            0 = off, 100 = maximum brightness.
+
+    config HUD_SOFTAP_PASSWORD
+        string "SoftAP Password"
+        default "HODHelmet2024"
+        help
+            Password for the fallback SoftAP access point.
+            Must be at least 8 characters for WPA2.
+
 endmenu
 

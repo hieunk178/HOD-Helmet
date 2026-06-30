@@ -191,11 +191,25 @@ void display_draw_hline(int x, int y, int width, uint16_t color);
 void display_draw_line(int x0, int y0, int x1, int y1, uint16_t color);
 
 /**
- * @brief Control the backlight
+ * @brief Control the backlight (on/off)
  *
  * @param on true to turn on, false to turn off
  */
 void display_set_backlight(bool on);
+
+/**
+ * @brief Set display brightness level using PWM
+ *
+ * @param percent Brightness percentage (0-100). 0 = off, 100 = max brightness.
+ */
+void display_set_brightness(uint8_t percent);
+
+/**
+ * @brief Get current display brightness level
+ *
+ * @return Current brightness percentage (0-100)
+ */
+uint8_t display_get_brightness(void);
 
 /**
  * @brief Draw a bitmap directly to a rectangular area on the screen

@@ -35,7 +35,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         
         // Configure osmdroid
-        org.osmdroid.config.Configuration.getInstance().load(applicationContext, android.preference.PreferenceManager.getDefaultSharedPreferences(applicationContext))
+        org.osmdroid.config.Configuration.getInstance().load(applicationContext, androidx.preference.PreferenceManager.getDefaultSharedPreferences(applicationContext))
         org.osmdroid.config.Configuration.getInstance().userAgentValue = "HUDHelmetApp"
 
         enableEdgeToEdge()

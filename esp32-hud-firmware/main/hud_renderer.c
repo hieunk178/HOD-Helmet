@@ -132,13 +132,18 @@ void hud_render_header(bool connected, const char *ip_address, int battery, int 
     lv_color_t bat_indicator_color = (bat_val < 20) ? lv_color_make(244, 67, 54) : 
                                      ((bat_val < 50) ? lv_color_make(255, 145, 0) : lv_color_make(0, 230, 118));
 
-    /* Header components across screens */
+    /* Header components across screens — only update active screen to reduce LVGL overhead */
+    lv_obj_t *screens[] = { ui_Screen_Main, ui_Screen_Notif, ui_Screen_Nav, ui_Screen_Stream };
     lv_obj_t *wifi_icons[] = { ui_Wifi_Icon, ui_Wifi_Icon_Notif, ui_Wifi_Icon_Nav, ui_Wifi_Icon_Stream };
     lv_obj_t *temp_labels[] = { ui_Temp_Label, ui_Temp_Label_Notif, ui_Temp_Label_Nav, ui_Temp_Label_Stream };
     lv_obj_t *bat_bars[] = { ui_Bat_Bar, ui_Bat_Bar_Notif, ui_Bat_Bar_Nav, ui_Bat_Bar_Stream };
     lv_obj_t *bat_labels[] = { ui_Bat_Label, ui_Bat_Label_Notif, ui_Bat_Label_Nav, ui_Bat_Label_Stream };
 
+    lv_obj_t *active_scr = lv_scr_act();
     for (int i = 0; i < 4; i++) {
+        /* Skip updating widgets on inactive screens to avoid unnecessary LVGL dirty flags */
+        if (screens[i] != active_scr) continue;
+
         if (wifi_icons[i]) {
             lv_obj_set_style_border_color(wifi_icons[i], wifi_color, 0);
             if (lv_obj_get_child_cnt(wifi_icons[i]) > 0) {

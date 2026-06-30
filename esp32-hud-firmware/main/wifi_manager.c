@@ -56,7 +56,7 @@ static void start_softap(void) {
             .ssid = "HOD_Helmet",
             .ssid_len = strlen("HOD_Helmet"),
             .channel = 1,
-            .password = "12345678",
+            .password = CONFIG_HUD_SOFTAP_PASSWORD,
             .max_connection = 4,
             .authmode = WIFI_AUTH_WPA2_PSK,
             .pmf_cfg = {
@@ -150,23 +150,32 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 static void udp_discovery_task(void *pvParameters) {
+    int sock = -1;
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(8888);
+    dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
     while (1) {
         if (s_state == WIFI_STATE_CONNECTED_STA || s_state == WIFI_STATE_AP_MODE) {
-            int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+            /* Create socket once, reuse across broadcasts */
+            if (sock < 0) {
+                sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+                if (sock >= 0) {
+                    int broadcastEnable = 1;
+                    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable));
+                }
+            }
             if (sock >= 0) {
-                int broadcastEnable = 1;
-                setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable));
-                
-                struct sockaddr_in dest_addr;
-                dest_addr.sin_family = AF_INET;
-                dest_addr.sin_port = htons(8888);
-                dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
-                
                 char payload[64];
                 snprintf(payload, sizeof(payload), "HUD_HELMET_IP:%s", s_ip_address);
-                
                 sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            }
+        } else {
+            /* Close socket when not connected to save resources */
+            if (sock >= 0) {
                 close(sock);
+                sock = -1;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(2000));

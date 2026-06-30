@@ -24,6 +24,7 @@ import com.hudhelmet.controller.network.WebSocketManager
 import com.hudhelmet.controller.service.NavigationEngine
 import com.hudhelmet.controller.service.MapNavStreamService
 import com.hudhelmet.controller.service.ScreenCaptureService
+import com.hudhelmet.controller.event.HudEventBus
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -71,6 +72,10 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
     // -- Notification Forwarding Enabled state --
     private val _notifForwardingEnabled = MutableStateFlow(sharedPrefs.getBoolean("notif_forwarding_enabled", true))
     val notifForwardingEnabled: StateFlow<Boolean> = _notifForwardingEnabled.asStateFlow()
+
+    // -- Display Brightness (0-100%) --
+    private val _displayBrightness = MutableStateFlow(sharedPrefs.getInt("display_brightness", 100))
+    val displayBrightness: StateFlow<Int> = _displayBrightness.asStateFlow()
 
     // -- Navigation data state --
     private val _currentNavData = MutableStateFlow<NavData?>(null)
@@ -153,9 +158,46 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
 
     private var cachedTemp: Int? = null
     private var lastWeatherAttemptTime: Long = 0
+    private val weatherHttpClient = okhttp3.OkHttpClient()
 
     init {
-        activeViewModel = this
+        // Subscribe to event bus for decoupled service communication
+        viewModelScope.launch {
+            HudEventBus.notificationSentEvents.collect { event ->
+                addSentNotification(event.title, event.message, event.success)
+            }
+        }
+        viewModelScope.launch {
+            HudEventBus.navDataEvents.collect { event ->
+                sendNavData(event.navData)
+                event.icon?.let { sendNavIcon(it) }
+            }
+        }
+        viewModelScope.launch {
+            HudEventBus.navClearEvents.collect {
+                clearNavData()
+            }
+        }
+        viewModelScope.launch {
+            HudEventBus.navigationStateUpdates.collect { update ->
+                updateNavigationStateFromService(
+                    currentLocation = update.currentLocation,
+                    currentSpeed = update.currentSpeed,
+                    currentBearing = update.currentBearing,
+                    navUpdate = update.navUpdate
+                )
+            }
+        }
+        viewModelScope.launch {
+            HudEventBus.routeUpdates.collect { route ->
+                updateRouteFromService(route)
+            }
+        }
+        viewModelScope.launch {
+            HudEventBus.arrivalEvents.collect {
+                handleArrival()
+            }
+        }
 
         if (com.hudhelmet.controller.service.MapNavStreamService.isRunning) {
             _isNavigating.value = true
@@ -171,6 +213,8 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     if (_autoSyncEnabled.value) {
                         startTimeSync()
                     }
+                    // Sync saved brightness to ESP32 on connect
+                    webSocketManager.sendBrightness(_displayBrightness.value)
                 } else {
                     if (state == ConnectionState.DISCONNECTED) {
                         _statusMessage.value = "Disconnected"
@@ -365,13 +409,14 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         lastWeatherAttemptTime = System.currentTimeMillis()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val lat = 21.0285 // Fallback to Hanoi
-                val lon = 105.8542
+                // Use GPS location if available, fallback to Hanoi
+                val location = _currentLocation.value
+                val lat = location?.lat ?: 21.0285
+                val lon = location?.lon ?: 105.8542
                 
                 val url = "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m"
-                val client = okhttp3.OkHttpClient()
                 val request = okhttp3.Request.Builder().url(url).build()
-                client.newCall(request).execute().use { response ->
+                weatherHttpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
                         val body = response.body?.string()
                         if (body != null) {
@@ -522,6 +567,17 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
     fun setNotifForwardingEnabled(enabled: Boolean) {
         _notifForwardingEnabled.value = enabled
         sharedPrefs.edit().putBoolean("notif_forwarding_enabled", enabled).apply()
+    }
+
+    fun setDisplayBrightness(brightness: Int) {
+        val clamped = brightness.coerceIn(0, 100)
+        _displayBrightness.value = clamped
+        sharedPrefs.edit().putInt("display_brightness", clamped).apply()
+        webSocketManager.sendBrightness(clamped) { success ->
+            if (success) {
+                _statusMessage.value = "🔆 Độ sáng: $clamped%"
+            }
+        }
     }
 
     fun sendPhoneNotification(title: String, message: String, appLabel: String) {
@@ -929,13 +985,5 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         if (!com.hudhelmet.controller.service.MapNavStreamService.isRunning) {
             webSocketManager.disconnect()
         }
-        if (activeViewModel == this) {
-            activeViewModel = null
-        }
-    }
-
-    companion object {
-        @Volatile
-        var activeViewModel: HudViewModel? = null
     }
 }

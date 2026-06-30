@@ -21,15 +21,14 @@
 static uint8_t s_jpeg_buf_a[JPEG_MAX_SIZE];
 static uint8_t s_jpeg_buf_b[JPEG_MAX_SIZE];
 
-static uint8_t *volatile s_write_buf = s_jpeg_buf_a;
-static uint8_t *volatile s_read_buf = s_jpeg_buf_b;
+static uint8_t *s_write_buf = s_jpeg_buf_a;
+static uint8_t *s_read_buf = s_jpeg_buf_b;
 
-static volatile uint32_t s_write_size = 0;
-static volatile uint32_t s_read_size = 0;
+static uint32_t s_write_size = 0;
+static uint32_t s_read_size = 0;
 
-static volatile bool s_frame_ready = false;
-static volatile bool s_write_frame_complete = false;
-static volatile bool s_display_busy = false;
+static bool s_frame_ready = false;
+static bool s_write_frame_complete = false;
 
 static uint16_t *s_frame_pixel_buf = NULL;
 
@@ -46,7 +45,12 @@ static hud_stream_config_t s_config = {
 
 static SemaphoreHandle_t s_config_mutex = NULL;
 static SemaphoreHandle_t s_frame_sem = NULL;
-static uint32_t s_last_packet_time = 0;
+static SemaphoreHandle_t s_buf_mutex = NULL;  /* Protects double buffer swap */
+static TickType_t s_last_packet_tick = 0;     /* Use ticks directly to avoid overflow */
+
+/* Pre-allocated JPEG decoder work buffer (avoids malloc/free every frame) */
+#define WORK_BUF_SIZE 5120
+static uint8_t *s_jpeg_work_buf = NULL;
 
 extern TaskHandle_t s_display_task_handle; // Defined in display_driver.c
 
@@ -61,9 +65,11 @@ void hud_stream_get_config(hud_stream_config_t *out_config) {
 bool hud_stream_is_active(void) {
     bool active = false;
     if (s_config_mutex && xSemaphoreTake(s_config_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        TickType_t now_tick = xTaskGetTickCount();
+        // Use tick difference directly (handles uint32 wrap-around correctly)
+        TickType_t elapsed_ticks = now_tick - s_last_packet_tick;
         // If stream is active but we haven't received packets for 2 seconds, mark as inactive
-        if (s_config.active && (now - s_last_packet_time > 2000)) {
+        if (s_config.active && (elapsed_ticks > pdMS_TO_TICKS(2000))) {
             s_config.active = false;
         }
         active = s_config.active;
@@ -79,11 +85,12 @@ void hud_stream_reset_active(void) {
     }
 }
 
-// TJpgDec Input Stream Struct
+// TJpgDec Input Stream Struct (also carries cached config to avoid per-MCU mutex)
 typedef struct {
     const uint8_t *data;
     uint32_t size;
     uint32_t offset;
+    hud_stream_config_t cfg;  /* Cached config — read once before decode */
 } jpeg_stream_t;
 
 // Input callback for TJpgDec
@@ -126,33 +133,26 @@ static UINT jpeg_output_func(JDEC *jd, void *bitmap, JRECT *rect) {
         pixel_buf[i] = (color >> 8) | (color << 8);
     }
     
-    // Get draw config
-    hud_stream_config_t cfg;
-    hud_stream_get_config(&cfg);
+    // Get draw config from cached context (avoids mutex lock per MCU block)
+    jpeg_stream_t *stream = (jpeg_stream_t *)jd->device;
+    hud_stream_config_t *cfg = &stream->cfg;
     
     if (s_frame_pixel_buf) {
         // Copy to full frame buffer
         for (int row = 0; row < h; row++) {
-            memcpy(&s_frame_pixel_buf[(y + row) * cfg.outW + x], &pixel_buf[row * w], w * 2);
+            memcpy(&s_frame_pixel_buf[(y + row) * cfg->outW + x], &pixel_buf[row * w], w * 2);
         }
     } else {
         // Fallback to direct draw (slower)
-        display_draw_bitmap(cfg.drawX + x, cfg.drawY + y, w, h, pixel_buf);
+        display_draw_bitmap(cfg->drawX + x, cfg->drawY + y, w, h, pixel_buf);
     }
     
     return 1; // continue decompression
 }
 
-// Decode and render JPEG frame
+// Decode and render JPEG frame (uses pre-allocated work buffer)
 static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
-    if (size == 0) return;
-    
-    #define WORK_BUF_SIZE 5120
-    uint8_t *work_buf = malloc(WORK_BUF_SIZE);
-    if (!work_buf) {
-        ESP_LOGE(TAG, "Failed to allocate decoder work buffer");
-        return;
-    }
+    if (size == 0 || s_jpeg_work_buf == NULL) return;
     
     jpeg_stream_t stream = {
         .data = jpeg_data,
@@ -160,11 +160,13 @@ static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
         .offset = 0
     };
     
+    // Cache config ONCE before decode (avoids ~225 mutex locks per frame)
+    hud_stream_get_config(&stream.cfg);
+    
     JDEC jd;
-    JRESULT res = jd_prepare(&jd, jpeg_input_func, work_buf, WORK_BUF_SIZE, &stream);
+    JRESULT res = jd_prepare(&jd, jpeg_input_func, s_jpeg_work_buf, WORK_BUF_SIZE, &stream);
     if (res != JDR_OK) {
         ESP_LOGE(TAG, "jd_prepare failed: %d", res);
-        free(work_buf);
         return;
     }
     
@@ -173,12 +175,8 @@ static void decode_and_draw_jpeg(const uint8_t *jpeg_data, uint32_t size) {
         ESP_LOGE(TAG, "jd_decomp failed: %d", res);
     } else if (s_frame_pixel_buf) {
         // Only flush if decoding was successful and we are buffering
-        hud_stream_config_t cfg;
-        hud_stream_get_config(&cfg);
-        display_draw_bitmap(cfg.drawX, cfg.drawY, cfg.outW, cfg.outH, s_frame_pixel_buf);
+        display_draw_bitmap(stream.cfg.drawX, stream.cfg.drawY, stream.cfg.outW, stream.cfg.outH, s_frame_pixel_buf);
     }
-    
-    free(work_buf);
 }
 
 static void hud_stream_display_task(void *pvParameters) {
@@ -196,25 +194,26 @@ static void hud_stream_display_task(void *pvParameters) {
     while (1) {
         // Wait for a new frame signal
         if (xSemaphoreTake(s_frame_sem, portMAX_DELAY) == pdTRUE) {
-            // Check if we have a frame completed or waiting
-            if (!s_frame_ready && s_write_frame_complete) {
-                // Swap write and read buffers
-                uint8_t *temp = s_write_buf;
-                s_write_buf = s_read_buf;
-                s_read_buf = temp;
-                s_read_size = s_write_size;
-                s_frame_ready = true;
-                s_write_frame_complete = false;
+            if (xSemaphoreTake(s_buf_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                // Check if we have a frame completed or waiting
+                if (!s_frame_ready && s_write_frame_complete) {
+                    // Swap write and read buffers
+                    uint8_t *temp = s_write_buf;
+                    s_write_buf = s_read_buf;
+                    s_read_buf = temp;
+                    s_read_size = s_write_size;
+                    s_frame_ready = true;
+                    s_write_frame_complete = false;
+                }
+                xSemaphoreGive(s_buf_mutex);
             }
             
-            // If frame is ready, decode it
+            // If frame is ready, decode it (outside mutex - decoding is slow)
             if (s_frame_ready) {
                 // Only decode if we are in stream mode!
                 hud_mode_t current_mode = http_server_get_mode();
                 if (current_mode == HUD_MODE_STREAM || current_mode == HUD_MODE_MAP_NAV) {
-                    s_display_busy = true;
                     decode_and_draw_jpeg(s_read_buf, s_read_size);
-                    s_display_busy = false;
                 }
                 s_frame_ready = false;
             }
@@ -277,7 +276,7 @@ static void hud_stream_rx_task(void *pvParameters) {
             continue;
         }
         
-        s_last_packet_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        s_last_packet_tick = xTaskGetTickCount();
         
         uint8_t type = rx_buf[2];
         uint16_t stream_id = (rx_buf[3] << 8) | rx_buf[4];
@@ -359,15 +358,20 @@ static void hud_stream_rx_task(void *pvParameters) {
                 // Calculate write offset (each chunk has 1000 bytes offset)
                 uint32_t offset = chunk_id * 1000;
                 if (offset + payload_len <= JPEG_MAX_SIZE) {
-                    memcpy(s_write_buf + offset, payload, payload_len);
-                    chunk_received_flags[chunk_id] = true;
-                    chunks_received++;
-                    
-                    // If we got all chunks for this frame
-                    if (chunks_received == chunk_count) {
-                        s_write_size = total_size;
-                        s_write_frame_complete = true;
-                        xSemaphoreGive(s_frame_sem);
+                    if (xSemaphoreTake(s_buf_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                        memcpy(s_write_buf + offset, payload, payload_len);
+                        chunk_received_flags[chunk_id] = true;
+                        chunks_received++;
+                        
+                        // If we got all chunks for this frame
+                        if (chunks_received == chunk_count) {
+                            s_write_size = total_size;
+                            s_write_frame_complete = true;
+                            xSemaphoreGive(s_buf_mutex);
+                            xSemaphoreGive(s_frame_sem);
+                        } else {
+                            xSemaphoreGive(s_buf_mutex);
+                        }
                     }
                 }
             }
@@ -382,8 +386,20 @@ void hud_stream_init(void) {
     if (s_config_mutex == NULL) {
         s_config_mutex = xSemaphoreCreateMutex();
     }
+    if (s_buf_mutex == NULL) {
+        s_buf_mutex = xSemaphoreCreateMutex();
+    }
     if (s_frame_sem == NULL) {
-        s_frame_sem = xSemaphoreCreateBinary();
+        // Use counting semaphore (max 2) to avoid losing frame signals
+        s_frame_sem = xSemaphoreCreateCounting(2, 0);
+    }
+    
+    // Pre-allocate JPEG decoder work buffer (avoids malloc/free every frame)
+    if (s_jpeg_work_buf == NULL) {
+        s_jpeg_work_buf = malloc(WORK_BUF_SIZE);
+        if (s_jpeg_work_buf == NULL) {
+            ESP_LOGE(TAG, "Failed to pre-allocate JPEG work buffer (%d bytes)", WORK_BUF_SIZE);
+        }
     }
     
     // Create Receiver task with priority 6 (higher than LVGL task)

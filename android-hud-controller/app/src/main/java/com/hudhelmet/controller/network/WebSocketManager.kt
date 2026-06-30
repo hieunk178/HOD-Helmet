@@ -6,6 +6,7 @@ import com.hudhelmet.controller.model.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.*
@@ -35,7 +36,7 @@ class WebSocketManager private constructor() {
         .pingInterval(10, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private val gson = Gson()
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var lastConnectedIp: String? = null
     private var userClosed = false
@@ -172,10 +173,19 @@ class WebSocketManager private constructor() {
                 val success = webSocket?.send(text) ?: false
                 if (success) Log.d(TAG, "Sent WS: $text")
                 else Log.w(TAG, "Failed to send WS: $text")
-                callback?.invoke(success)
+                // Invoke callback on Main thread for safe UI updates
+                if (callback != null) {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        callback.invoke(success)
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending JSON", e)
-                callback?.invoke(false)
+                if (callback != null) {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        callback.invoke(false)
+                    }
+                }
             }
         }
     }
@@ -258,5 +268,33 @@ class WebSocketManager private constructor() {
         json.addProperty("cmd", "wifi_delete")
         json.addProperty("ssid", ssid)
         webSocket?.send(json.toString())
+    }
+
+    fun sendBrightness(brightness: Int, callback: ((Boolean) -> Unit)? = null) {
+        if (!isConnected || webSocket == null) {
+            callback?.invoke(false)
+            return
+        }
+        scope.launch {
+            try {
+                val json = com.google.gson.JsonObject()
+                json.addProperty("cmd", "brightness")
+                json.addProperty("brightness", brightness.coerceIn(0, 100))
+                val success = webSocket?.send(json.toString()) ?: false
+                if (success) Log.d(TAG, "Sent brightness: $brightness%")
+                if (callback != null) {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        callback.invoke(success)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending brightness", e)
+                if (callback != null) {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        callback.invoke(false)
+                    }
+                }
+            }
+        }
     }
 }

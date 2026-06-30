@@ -17,6 +17,7 @@
 
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
@@ -47,15 +48,30 @@ static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 /* Framebuffer line for batch drawing */
 static uint16_t s_line_buf[DISPLAY_WIDTH];
 
-/* LVGL display buffers and handles */
+/* Pre-allocated DMA buffer for display_fill_rect batch operations */
+#define FILL_RECT_DMA_MAX_PIXELS (DISPLAY_WIDTH * 20)  /* 240*20 = 4800 pixels = 9.6KB */
+static uint16_t *s_fill_rect_dma_buf = NULL;
+
+/* LVGL display buffers and handles (double buffered for DMA pipeline) */
 static lv_disp_draw_buf_t s_disp_buf;
 static lv_color_t *s_lv_buf_1 = NULL;
+static lv_color_t *s_lv_buf_2 = NULL;
 static lv_disp_drv_t s_disp_drv;
 static volatile bool s_lvgl_initialized = false;
 
 /* Screen Stream Synchronization state */
 static volatile bool s_lvgl_flushing = false;
 TaskHandle_t s_display_task_handle = NULL;
+
+/* Backlight brightness state (0-100%) */
+static uint8_t s_brightness = 100;
+
+/* LEDC PWM configuration for backlight */
+#define BLK_LEDC_TIMER    LEDC_TIMER_0
+#define BLK_LEDC_CHANNEL  LEDC_CHANNEL_0
+#define BLK_LEDC_SPEED    LEDC_LOW_SPEED_MODE
+#define BLK_LEDC_DUTY_RES LEDC_TIMER_10_BIT   /* 0-1023 */
+#define BLK_LEDC_FREQ     5000                 /* 5 kHz PWM */
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -99,13 +115,29 @@ esp_err_t display_init(void)
 #endif
 
 #ifdef CONFIG_HUD_HAS_BACKLIGHT_PIN
-    /* Configure backlight GPIO (real hardware only) */
-    gpio_config_t bk_gpio_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << PIN_NUM_BLK,
+    /* Configure backlight using LEDC PWM for brightness control */
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = BLK_LEDC_SPEED,
+        .timer_num        = BLK_LEDC_TIMER,
+        .duty_resolution  = BLK_LEDC_DUTY_RES,
+        .freq_hz          = BLK_LEDC_FREQ,
+        .clk_cfg          = LEDC_AUTO_CLK
     };
-    gpio_config(&bk_gpio_config);
-    gpio_set_level(PIN_NUM_BLK, 1);  /* Turn on backlight */
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = BLK_LEDC_SPEED,
+        .channel        = BLK_LEDC_CHANNEL,
+        .timer_sel      = BLK_LEDC_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = PIN_NUM_BLK,
+        .duty           = 1023,  /* Start at full brightness */
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+    s_brightness = CONFIG_HUD_DEFAULT_BRIGHTNESS;
+    display_set_brightness(s_brightness);
+    ESP_LOGI(TAG, "Backlight PWM initialized (brightness: %d%%)", s_brightness);
 #endif
 
     /* Initialize SPI bus */
@@ -208,6 +240,12 @@ esp_err_t display_init(void)
     /* Turn on the display */
     esp_lcd_panel_disp_on_off(s_panel_handle, true);
 
+    /* Pre-allocate DMA buffer for fill_rect batch operations */
+    s_fill_rect_dma_buf = heap_caps_malloc(FILL_RECT_DMA_MAX_PIXELS * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_fill_rect_dma_buf == NULL) {
+        ESP_LOGW(TAG, "Failed to pre-allocate fill_rect DMA buffer, will use line-by-line fallback");
+    }
+
     /* Clear screen to black */
     display_clear(COLOR_BLACK);
 
@@ -216,14 +254,21 @@ esp_err_t display_init(void)
     /* Initialize LVGL */
     lv_init();
 
-    /* Allocate buffer for LVGL in DMA-capable internal SRAM */
-    s_lv_buf_1 = heap_caps_malloc(DISPLAY_WIDTH * 10 * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    /* Allocate double buffers for LVGL in DMA-capable internal SRAM.
+     * Double buffering allows LVGL to render into buffer B while buffer A
+     * is being DMA-transferred to the display, improving throughput ~40-60%. */
+    size_t lv_buf_size = DISPLAY_WIDTH * 10 * sizeof(lv_color_t);
+    s_lv_buf_1 = heap_caps_malloc(lv_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    s_lv_buf_2 = heap_caps_malloc(lv_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (s_lv_buf_1 == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffer!");
+        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffer 1!");
         return ESP_ERR_NO_MEM;
     }
+    if (s_lv_buf_2 == NULL) {
+        ESP_LOGW(TAG, "Failed to allocate LVGL draw buffer 2, falling back to single buffer");
+    }
 
-    lv_disp_draw_buf_init(&s_disp_buf, s_lv_buf_1, NULL, DISPLAY_WIDTH * 10);
+    lv_disp_draw_buf_init(&s_disp_buf, s_lv_buf_1, s_lv_buf_2, DISPLAY_WIDTH * 10);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res = DISPLAY_WIDTH;
@@ -265,12 +310,20 @@ void display_fill_rect(int x, int y, int width, int height, uint16_t color)
     if (x + width > DISPLAY_WIDTH) width = DISPLAY_WIDTH - x;
     if (y + height > DISPLAY_HEIGHT) height = DISPLAY_HEIGHT - y;
 
-    /* Fill line buffer with color (no manual swap - esp_lcd handles byte order) */
+    /* Try batch DMA: use pre-allocated buffer for fast single SPI transaction */
+    int total_pixels = width * height;
+    if (total_pixels <= FILL_RECT_DMA_MAX_PIXELS && s_fill_rect_dma_buf != NULL) {
+        for (int i = 0; i < total_pixels; i++) {
+            s_fill_rect_dma_buf[i] = color;
+        }
+        esp_lcd_panel_draw_bitmap(s_panel_handle, x, y, x + width, y + height, s_fill_rect_dma_buf);
+        return;
+    }
+
+    /* Fallback: fill line buffer and draw line by line */
     for (int i = 0; i < width && i < DISPLAY_WIDTH; i++) {
         s_line_buf[i] = color;
     }
-
-    /* Draw line by line */
     for (int row = y; row < y + height; row++) {
         esp_lcd_panel_draw_bitmap(s_panel_handle, x, row, x + width, row + 1, s_line_buf);
     }
@@ -426,8 +479,31 @@ void display_draw_hline(int x, int y, int width, uint16_t color)
 void display_set_backlight(bool on)
 {
 #ifdef CONFIG_HUD_HAS_BACKLIGHT_PIN
-    gpio_set_level(PIN_NUM_BLK, on ? 1 : 0);
+    if (on) {
+        display_set_brightness(s_brightness > 0 ? s_brightness : 100);
+    } else {
+        ledc_set_duty(BLK_LEDC_SPEED, BLK_LEDC_CHANNEL, 0);
+        ledc_update_duty(BLK_LEDC_SPEED, BLK_LEDC_CHANNEL);
+    }
 #endif
+}
+
+void display_set_brightness(uint8_t percent)
+{
+#ifdef CONFIG_HUD_HAS_BACKLIGHT_PIN
+    if (percent > 100) percent = 100;
+    s_brightness = percent;
+    /* Convert 0-100% to 0-1023 duty cycle */
+    uint32_t duty = (uint32_t)percent * 1023 / 100;
+    ledc_set_duty(BLK_LEDC_SPEED, BLK_LEDC_CHANNEL, duty);
+    ledc_update_duty(BLK_LEDC_SPEED, BLK_LEDC_CHANNEL);
+    ESP_LOGI(TAG, "Brightness set to %d%% (duty: %lu)", percent, duty);
+#endif
+}
+
+uint8_t display_get_brightness(void)
+{
+    return s_brightness;
 }
 
 uint32_t next_utf8_char(const char **str)
@@ -495,11 +571,19 @@ uint32_t next_utf8_char_normalized(const char **str)
         }
 
         if (is_combining) {
-            // Try to find a mapping (codepoint, next_cp) in vn_nfc_table
+            // Binary search for mapping (codepoint, next_cp) in sorted vn_nfc_table
             bool found = false;
-            for (int i = 0; i < 192; i++) {
-                if (vn_nfc_table[i].base == codepoint && vn_nfc_table[i].mark == next_cp) {
-                    codepoint = vn_nfc_table[i].composed;
+            int lo = 0, hi = 191;
+            while (lo <= hi) {
+                int mid = (lo + hi) / 2;
+                if (vn_nfc_table[mid].base < codepoint ||
+                    (vn_nfc_table[mid].base == codepoint && vn_nfc_table[mid].mark < next_cp)) {
+                    lo = mid + 1;
+                } else if (vn_nfc_table[mid].base > codepoint ||
+                           (vn_nfc_table[mid].base == codepoint && vn_nfc_table[mid].mark > next_cp)) {
+                    hi = mid - 1;
+                } else {
+                    codepoint = vn_nfc_table[mid].composed;
                     *str = peek_str; // Advance string pointer past combining mark
                     found = true;
                     break;
@@ -782,7 +866,11 @@ void display_draw_bitmap(int x, int y, int width, int height, const uint16_t *bi
     esp_lcd_panel_draw_bitmap(s_panel_handle, x, y, x + w, y + h, bitmap);
 
     if (s_display_task_handle != NULL) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Wait for SPI transfer complete with timeout (500ms) to prevent infinite block */
+        uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+        if (notified == 0) {
+            ESP_LOGW(TAG, "display_draw_bitmap: SPI transfer timeout!");
+        }
     }
 }
 

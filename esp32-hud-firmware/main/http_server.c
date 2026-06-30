@@ -9,12 +9,12 @@
 #include "wifi_manager.h"
 #include "esp_wifi.h"
 #include "hud_stream.h"
+#include "display_driver.h"
 
 #include "esp_http_server.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -37,7 +37,7 @@ static hud_notification_t s_notification = {0};
 static hud_mode_t s_hud_mode = HUD_MODE_DEFAULT;
 static hud_nav_data_t s_nav_data = {0};
 static SemaphoreHandle_t s_data_mutex = NULL;
-static httpd_req_t *s_last_ws_req = NULL;
+static int s_ws_fd = -1;  /* WebSocket file descriptor for async sends */
 
 /* Storage for 64x64 RGB565 navigation icon */
 uint8_t g_nav_icon_rgb565[8192];
@@ -65,8 +65,23 @@ static void send_ws_json(httpd_req_t *req, cJSON *root) {
     }
 }
 
+/* Async-safe version: sends via fd instead of req pointer */
+static void send_ws_json_async(int fd, cJSON *root) {
+    if (fd < 0 || s_server == NULL) return;
+    char *str = cJSON_PrintUnformatted(root);
+    if (str) {
+        httpd_ws_frame_t ws_pkt;
+        memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+        ws_pkt.payload = (uint8_t*)str;
+        ws_pkt.len = strlen(str);
+        ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+        httpd_ws_send_frame_async(s_server, fd, &ws_pkt);
+        free(str);
+    }
+}
+
 static void wifi_scan_callback(void *results, int count) {
-    if (!s_last_ws_req) return;
+    if (s_ws_fd < 0) return;
     wifi_ap_record_t *ap_info = (wifi_ap_record_t *)results;
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "cmd", "wifi_scan_result");
@@ -77,7 +92,7 @@ static void wifi_scan_callback(void *results, int count) {
         cJSON_AddNumberToObject(item, "rssi", ap_info[i].rssi);
         cJSON_AddItemToArray(arr, item);
     }
-    send_ws_json(s_last_ws_req, root);
+    send_ws_json_async(s_ws_fd, root);
     cJSON_Delete(root);
 }
 
@@ -115,7 +130,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
         ws_pkt.payload = buf;
         ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
         if (ret == ESP_OK) {
-            s_last_ws_req = req;
+            s_ws_fd = httpd_req_to_sockfd(req);
             if (ws_pkt.type == HTTPD_WS_TYPE_BINARY) {
                 if (ws_pkt.len > 0 && ws_pkt.payload[0] == 0x01) {
                     if (ws_pkt.len == 8193) { // 1 byte header + 8192 bytes image
@@ -132,7 +147,9 @@ static esp_err_t ws_handler(httpd_req_t *req) {
             } else if (ws_pkt.type == HTTPD_WS_TYPE_TEXT) {
                 ESP_LOGI(TAG, "WS Recv: %s", ws_pkt.payload);
                 cJSON *root = cJSON_Parse((const char *)ws_pkt.payload);
-                if (root) {
+                if (root == NULL) {
+                    ESP_LOGE(TAG, "Failed to parse JSON: %s", (const char *)ws_pkt.payload);
+                } else {
                 cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
                 if (cJSON_IsString(cmd)) {
                     if (strcmp(cmd->valuestring, "wifi_scan") == 0) {
@@ -274,6 +291,15 @@ static esp_err_t ws_handler(httpd_req_t *req) {
                             nav.active = cJSON_IsBool(active) ? cJSON_IsTrue(active) : true;
                             nav.timestamp = esp_timer_get_time() / 1000;
                             http_server_update_nav(&nav);
+                        }
+                    } else if (strcmp(cmd->valuestring, "brightness") == 0) {
+                        cJSON *brightness = cJSON_GetObjectItem(root, "brightness");
+                        if (cJSON_IsNumber(brightness)) {
+                            int val = brightness->valueint;
+                            if (val < 0) val = 0;
+                            if (val > 100) val = 100;
+                            display_set_brightness((uint8_t)val);
+                            ESP_LOGI(TAG, "Brightness set to %d%%", val);
                         }
                     }
                 }
